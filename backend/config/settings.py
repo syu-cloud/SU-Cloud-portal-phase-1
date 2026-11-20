@@ -163,3 +163,26 @@ CELERY_RESULT_EXPIRES = 3600
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
 AUTH_USER_MODEL = "accounts.User"
+
+CSRF_FAILURE_VIEW = "accounts.views.csrf_failure"
+
+# 사용자 승인 로컬 개발값. 운영 정책은 팀 협의 후 별도 확정한다.
+SIGNUP_MAX_FAILED_ATTEMPTS = int(os.environ.get("SIGNUP_MAX_FAILED_ATTEMPTS", "5"))
+SIGNUP_GRANT_SECONDS = int(os.environ.get("SIGNUP_GRANT_SECONDS", "1800"))
+SIGNUP_RATE_WINDOW_SECONDS = int(os.environ.get("SIGNUP_RATE_WINDOW_SECONDS", "900"))
+SIGNUP_ISSUE_LIMITS = (int(os.environ.get("SIGNUP_ISSUE_EMAIL_LIMIT", "5")),
+                       int(os.environ.get("SIGNUP_ISSUE_IP_LIMIT", "30")))
+SIGNUP_VERIFY_LIMITS = (int(os.environ.get("SIGNUP_VERIFY_EMAIL_LIMIT", "20")),
+                        int(os.environ.get("SIGNUP_VERIFY_IP_LIMIT", "100")))
+SIGNUP_RATE_REDIS_URL = os.environ.get("SIGNUP_RATE_REDIS_URL", "redis://127.0.0.1:6379/2")
+SIGNUP_RATE_PREFIX = "phase1:signup"
+
+EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.filebased.EmailBackend")
+EMAIL_FILE_PATH = BASE_DIR.parent / ".local" / "mail"
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "25"))
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "false").lower() == "true"
+EMAIL_TIMEOUT = 10
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "SU Cloud <no-reply@localhost>")
