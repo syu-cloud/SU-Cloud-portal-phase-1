@@ -16,6 +16,7 @@ from django.views.decorators.debug import sensitive_post_parameters, sensitive_v
 from django.views.decorators.http import require_GET
 
 from . import signup as service
+from .mail import delivery_mode
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ def timestamp(value):
 def csrf(request):
     if service.FLOW_SESSION_KEY not in request.session:
         request.session[service.FLOW_SESSION_KEY] = str(uuid.uuid4())
-    return JsonResponse({"csrf_token": get_token(request)})
+    return JsonResponse({"csrf_token": get_token(request), "email_delivery": delivery_mode()})
 
 
 @signup_post({"school_email"}, optional={"flow_id"})

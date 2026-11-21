@@ -1,5 +1,6 @@
 import json
 import re
+import smtplib
 import threading
 import time
 import uuid
@@ -401,6 +402,19 @@ class SignupTests(TransactionTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIn("text/html", response["Content-Type"])
 
+    def test_csrf_exposes_only_public_mail_mode(self):
+        for backend, mode in (("smtp", "smtp"), ("filebased", "file"), ("locmem", "test")):
+            with self.subTest(mode=mode), override_settings(
+                EMAIL_BACKEND=f"django.core.mail.backends.{backend}.EmailBackend",
+                EMAIL_HOST_PASSWORD="private-smtp-password", EMAIL_HOST_USER="private@example.com",
+            ):
+                response = self.client.get(ROOT + "csrf")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(set(response.json()), {"csrf_token", "email_delivery"})
+                self.assertEqual(response.json()["email_delivery"], mode)
+                self.assertNotIn("private-smtp-password", response.content.decode())
+                self.assertNotIn("private@example.com", response.content.decode())
+
     def test_json_shape_and_unknown_fields(self):
         for body in ("[]", "null", "{", '{"school_email":"x@syuin.ac.kr","role":"ADMIN"}'):
             response = self.client.post(ISSUE, body, content_type="application/json",
@@ -497,6 +511,71 @@ class SignupTests(TransactionTestCase):
         challenge = AuthChallenge.objects.get()
         self.assertIsNotNone(challenge.revoked_at)
         self.assertEqual(challenge.last_sent_at, accepted_at)
+
+    @override_settings(
+        EMAIL_HOST="smtp.gmail.com", EMAIL_HOST_USER="sahmyookcloud@gmail.com",
+        EMAIL_HOST_PASSWORD="test-only-app-password",
+        DEFAULT_FROM_EMAIL="SU Cloud <sahmyookcloud@gmail.com>",
+    )
+    def test_smtp_sender_and_acceptance_log_hide_secrets(self):
+        issued = self.issue()
+        with override_settings(EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend"):
+            with patch("accounts.tasks.send_mail", return_value=1) as send:
+                with self.assertLogs("accounts.tasks", level="INFO") as logs:
+                    send_signup_email.run(issued["challenge_id"], issued["verification_code"])
+        self.assertEqual(send.call_args.args[2], "SU Cloud <sahmyookcloud@gmail.com>")
+        self.assertEqual(send.call_args.args[3], [issued["school_email"]])
+        self.assertIn("signup_mail_accepted", " ".join(logs.output))
+        self.assertIn("mode=smtp", " ".join(logs.output))
+        for secret in (issued["verification_code"], issued["school_email"], "test-only-app-password"):
+            self.assertNotIn(secret, " ".join(logs.output))
+
+    def test_smtp_failure_logs_only_category_and_retries_safely(self):
+        issued = self.issue()
+        private = f"test-only-app-password {issued['school_email']} {issued['verification_code']}"
+        failures = (
+            (smtplib.SMTPAuthenticationError(535, private.encode()), "SMTP_AUTH_FAILED"),
+            (smtplib.SMTPRecipientsRefused({issued["school_email"]: (550, private.encode())}), "SMTP_RECIPIENT_REJECTED"),
+        )
+        for failure, category in failures:
+            with self.subTest(category=category), override_settings(
+                EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend", EMAIL_HOST="smtp.gmail.com",
+                EMAIL_HOST_USER="sender@example.com", EMAIL_HOST_PASSWORD="test-only-app-password",
+            ):
+                with patch("accounts.tasks.send_mail", side_effect=failure):
+                    with patch.object(send_signup_email, "retry", side_effect=RuntimeError("safe retry")) as retry:
+                        with self.assertLogs("accounts.tasks", level="WARNING") as logs:
+                            with self.assertRaisesRegex(RuntimeError, "safe retry"):
+                                send_signup_email.run(issued["challenge_id"], issued["verification_code"])
+                self.assertIn(category, " ".join(logs.output))
+                for secret in (issued["verification_code"], issued["school_email"], "test-only-app-password"):
+                    self.assertNotIn(secret, " ".join(logs.output))
+                self.assertEqual(str(retry.call_args.kwargs["exc"]), "인증메일 발송 실패")
+                self.assertEqual(retry.call_args.kwargs["argsrepr"], "(<challenge>, <redacted>)")
+
+    def test_missing_smtp_password_and_console_backend_do_not_send(self):
+        issued = self.issue()
+        for backend in ("smtp", "console"):
+            with self.subTest(backend=backend), override_settings(
+                EMAIL_BACKEND=f"django.core.mail.backends.{backend}.EmailBackend", EMAIL_HOST_PASSWORD="",
+            ):
+                with patch("accounts.tasks.send_mail") as send:
+                    with patch.object(send_signup_email, "retry", side_effect=RuntimeError("safe retry")):
+                        with self.assertLogs("accounts.tasks", level="WARNING") as logs:
+                            with self.assertRaisesRegex(RuntimeError, "safe retry"):
+                                send_signup_email.run(issued["challenge_id"], issued["verification_code"])
+                send.assert_not_called()
+                self.assertIn("MAIL_CONFIG_ERROR", " ".join(logs.output))
+
+    def test_zero_sent_count_is_not_logged_as_accepted(self):
+        issued = self.issue()
+        with patch("accounts.tasks.send_mail", return_value=0):
+            with patch.object(send_signup_email, "retry", side_effect=RuntimeError("safe retry")):
+                with self.assertLogs("accounts.tasks", level="INFO") as logs:
+                    with self.assertRaisesRegex(RuntimeError, "safe retry"):
+                        send_signup_email.run(issued["challenge_id"], issued["verification_code"])
+        self.assertIn("MAIL_DELIVERY_FAILED", " ".join(logs.output))
+        self.assertNotIn("signup_mail_accepted", " ".join(logs.output))
 
     def parallel(self, jobs):
         barrier = threading.Barrier(len(jobs))
